@@ -1,85 +1,51 @@
-from typing import TypedDict, NamedTuple
-import itertools as it
-import json
-import operator as op
-import tomllib
+from pprint import pprint
 import argparse
+import json
+import sys
+import tomllib
 
 from ollama import chat
-from pydantic import BaseModel
 
-from tools import TOOLS, fallback
+from model import MealPlan, Note
+from tools import ToolExecutor, TOOLS
 import db
 
 
-class Payload(TypedDict):
-    model: str
-    messages: list[dict[str, str]]
-
-
-def get_payload() -> Payload:
-    return {
-        "model": "llama3.1",
-        "messages": [],
-    }
-
-
-payload = {**get_payload(), "tools": TOOLS.values(), "stream": True}
 green = "\033[92;40m"
 reset = "\033[0m"
 
 
-class Meal(BaseModel):
-    name: str
-    ingredients: list[str]
-    steps: list[str]
-
-
-class MealPlan(BaseModel):
-    grocery_list: list[str]
-    meals: list[Meal]
-
-    def print(self):
-        print("# Grocery list")
-        for grocery in self.grocery_list:
-            print(f"- {grocery}")
-        print()
-        print("# Meals")
-        for meal in self.meals:
-            print(f"## {meal.name}")
-            print("Ingredients")
-            for ingredient in meal.ingredients:
-                print(f"- {ingredient}")
-            print("Steps")
-            for i, step in enumerate(meal.steps, 1):
-                print(f"{i}. {step}")
-
-
 def main():
+    tool_calls = True
     for message in get_user_messages(get_user_contents()):
         payload["messages"].append(message)
         while True:
-            stream = chat(**payload, format=MealPlan.model_json_schema())
-            output = process_chunks(stream)
+            if tool_calls:
+                extra_payload = {
+                    "tools": [t.func for t in TOOLS.values()],
+                    "stream": True,
+                }
+            else:
+                print(f"{green}Collecting structured response{reset}")
+                extra_payload = {"format": MealPlan.model_json_schema()}
+            response = chat(**payload, **extra_payload)
 
-            try:
-                content = "".join(output["content"])
-                mealplan = MealPlan.model_validate_json(content)
+            if tool_calls:
+                tool_calls = False
+                for name, result in ToolExecutor(process_chunks(response)):
+                    payload["messages"].append(
+                        {"role": "tool", "tool_name": name, "content": result}
+                    )
+                    tool_calls = True
+            else:
+                mealplan = MealPlan.model_validate_json(response.message.content)
                 mealplan.print()
-                payload["messages"].append({"role": "assistant", "content": content})
-            except KeyError:
-                pass
-
-            try:
-                tool_processor = ToolProcessor(output["tool_calls"])
-            except KeyError:
-                break
-
-            for name, result in tool_processor:
                 payload["messages"].append(
-                    {"role": "tool", "tool_name": name, "content": result}
+                    {
+                        "role": "assistant",
+                        "content": response.message.content,
+                    }
                 )
-            if tool_processor.interrupted:
                 break
 
 
@@ -94,7 +60,6 @@ def get_initial_prompt():
         "Avoid meats. Don't get too many ingredients in the same category. "
         "The meal plan should come in the form of a grocery list that should "
         "last roughly 1-2 weeks and 3 meal ideas. "
-        "Do not provide new meal ideas per day, provide 3 meal ideas total. "
         "I should be able to finish all perishables without worrying about anything going bad. "
         "Prioritize ingredients I already have in my pantry.\n"
         f"Cooking equipment: {equipment}.\n"
@@ -138,66 +103,15 @@ def get_user_messages(user_contents):
 
 
 def process_chunks(stream):
-    output = {}
-    phases = ["content", "tool_calls"]
-    new_line_phases = {"tool_calls"}
-
-    def get_chunks():
-        phase_iter = iter(phases)
-        phase = next(phase_iter)
-        for chunk in stream:
-            while phase is not None:
-                content = getattr(chunk.message, phase)
-                if content:
-                    yield phase, content
-                    break
-                phase = next(phase_iter, None)
-
-    chunks = get_chunks()
-    chunks = it.groupby(chunks, op.itemgetter(0))
-
     try:
-        for phase, chunk in chunks:
-            print(f"<{phase}>")
-            contents = []
-            output[phase] = contents
-            for _, content in chunk:
-                if phase in new_line_phases:
-                    contents.extend(content)
-                    for item in content:
-                        print(item)
-                else:
-                    contents.append(content)
-                    print(content, end="", flush=True)
-            if phase not in new_line_phases:
-                print()
-            print(f"</{phase}>")
+        for chunk in stream:
+            if chunk.message.tool_calls:
+                yield from chunk.message.tool_calls
+            else:
+                break
     except KeyboardInterrupt:
         print()
         print("Interrupted LLM")
-
-    return output
-
-
-class ToolProcessor:
-    def __init__(self, tool_calls):
-        self.interrupted = False
-        self.calls = tool_calls
-
-    def __iter__(self):
-        for call in self.calls:
-            print(f"Calling tool {call.function.name}")
-            try:
-                name = call.function.name
-                args = call.function.arguments
-                result = TOOLS.get(name, fallback)(**args)
-                if not isinstance(result, str):
-                    result = json.dumps(result)
-                yield name, result
-            except KeyboardInterrupt:
-                print()
-                print("Interrupted Tool Call")
-                self.interrupted = True
 
 
 def rewind(messages):
@@ -205,23 +119,18 @@ def rewind(messages):
     for message in messages:
         print(f"<{message['role']}>")
         if message["role"] == "tool":
-            key = "tool_name"
+            print(message["tool_name"])
+            pprint(json.loads(message["content"]))
+        elif message["role"] == "assistant":
+            mealplan = MealPlan.model_validate_json(message["content"])
+            mealplan.print()
         else:
-            key = "content"
-        print(f"{message[key]}")
+            print(message["content"])
         print(f"</{message['role']}>")
 
 
-class Summary(NamedTuple):
-    likes: str
-    dislikes: str
-
-
-def get_summary() -> Summary:
-    return Summary(
-        likes=input(f"{green}Likes{reset}: "),
-        dislikes=input(f"{green}Dislikes{reset}: "),
-    )
+def get_note() -> Note:
+    return input(f"{green}Note{reset}: ")
 
 
 if __name__ == "__main__":
@@ -229,18 +138,32 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("-r", "--rewind")
     mode.add_argument("-n", "--note")
+    mode.add_argument("-f", "--final")
     args = parser.parse_args()
 
     db.initialize()
+    if args.final is not None:
+        message = json.loads(db.get_final_chat(args.final))
+        mealplan = MealPlan.model_validate_json(message["content"])
+        mealplan.print()
+        sys.exit(0)
+
+    payload = {
+        "model": "llama3.1",
+        "messages": [],
+    }
+
     if args.rewind is not None:
         rewind_id = args.rewind
     elif args.note is not None:
         rewind_id = args.note
     else:
         rewind_id = None
+
     if rewind_id is not None:
         rewind(json.loads(db.get_chat(rewind_id)))
+
     if args.note:
-        db.insert_summary(args.note, get_summary())
+        db.insert_note(args.note, get_note())
     else:
         main()

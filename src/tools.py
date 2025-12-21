@@ -1,35 +1,32 @@
-from typing import Any
-from collections import UserDict
+from dataclasses import dataclass
 from pprint import pprint
+from typing import Callable
+import json
 
 import db
 
-# TODO revise docstrings
+
+TOOLS = {}
 
 
-class ToolContext(UserDict):
-    def __init__(self):
-        super().__init__()
-        self.con = None
-
-    def __setitem__(self, key, val):
-        self.data[key] = val
-
-    def __getitem__(self, key):
-        return self.data[key]
+@dataclass
+class Tool:
+    func: Callable
+    limit: int | None = None
 
 
-TOOLS = ToolContext()
+def tool(limit=None):
+    def wrapper(f):
+        TOOLS[f.__name__] = Tool(f, limit)
+        return f
 
-def tool(f):
-    TOOLS[f.__name__] = f
-    return f
+    return wrapper
 
 
-@tool
-def get_meal_summaries(
+@tool(limit=1)
+def get_meal_notes(
     n: int = 3,
-) -> list[list[dict]]:
+) -> list[dict]:
     """Get a random sample of likes and dislikes from past meal plans
 
     The list may have less than the requested number
@@ -39,7 +36,7 @@ def get_meal_summaries(
 
     :returns: An array of the meal plan summaries, formatted with likes and dislikes
     """
-    return db.get_random_chat_summaries(n)
+    return db.get_random_chat_notes(n)
 
 
 def get_food_details() -> str:
@@ -53,5 +50,33 @@ def get_food_details() -> str:
     raise NotImplementedError
 
 
-def fallback(**kwargs: Any) -> str:
-    return "Unknown tool"
+class ToolExecutor:
+    def __init__(self, calls):
+        self.interrupted = False
+        self.calls = calls
+
+    def __iter__(self):
+        for call in self.calls:
+            try:
+                name = call.function.name
+                args = call.function.arguments
+                try:
+                    tool = TOOLS[name]
+                except KeyError:
+                    continue
+                if tool.limit == 0:
+                    print(f"Hit tool limit for {name}")
+                    continue
+                elif tool.limit is not None:
+                    tool.limit -= 1
+                print(f"Calling tool {name}")
+                pprint(args)
+                result = tool.func(**args)
+                pprint(result)
+                if not isinstance(result, str):
+                    result = json.dumps(result)
+                yield name, result
+            except KeyboardInterrupt:
+                print()
+                print("Interrupted Tool Call")
+                self.interrupted = True

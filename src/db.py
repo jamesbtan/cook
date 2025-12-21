@@ -38,16 +38,15 @@ def initialize(cur: sqlite3.Cursor):
         ")"
     )
     cur.execute(
-        "CREATE TABLE IF NOT EXISTS summaries ("
-        "  summary_id INTEGER PRIMARY KEY, chat_id INTEGER UNIQUE NOT NULL,"
-        "  likes TEXT, dislikes TEXT,"
+        "CREATE TABLE IF NOT EXISTS notes ("
+        "  note_id INTEGER PRIMARY KEY, chat_id INTEGER UNIQUE NOT NULL, note TEXT,"
         "  FOREIGN KEY (chat_id) REFERENCES chat_history(chat_id)"
         ")"
     )
 
 
 @transaction
-def insert_chat(cur: sqlite3.Cursor, messages: list[str]):
+def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
     cur.execute(
         "INSERT INTO chat_history (messages) VALUES (jsonb(?))",
         (json.dumps(messages),),
@@ -55,18 +54,17 @@ def insert_chat(cur: sqlite3.Cursor, messages: list[str]):
 
 
 @transaction
-def insert_summary(cur: sqlite3.Cursor, chat_id: int, summary):
+def insert_note(cur: sqlite3.Cursor, chat_id: int, note: str):
     cur.execute(
-        "INSERT INTO summaries (chat_id, likes, dislikes) VALUES (?, ?, ?)",
-        (
-            chat_id,
-            summary.likes,
-            summary.dislikes,
-        ),
+        "INSERT INTO summaries (chat_id, note) VALUES (?, ?)",
+        (chat_id, note),
     )
 
 
-def get_chat(chat_id: int):
+# in general, I am preferring to defer JSON deserialization
+# because otherwise we have cases where we deserialize than immediately serialize
+# when we pass to the LLM
+def get_chat(chat_id: int) -> str:
     cur = con.cursor()
     try:
         cur.execute(
@@ -82,11 +80,43 @@ def get_chat(chat_id: int):
         cur.close()
 
 
-def get_random_chat_summaries(n: int):
+def get_user_chats(chat_id: int) -> str:
     cur = con.cursor()
     try:
         cur.execute(
-            "SELECT chat_id, likes, dislikes FROM summaries ORDER BY random() LIMIT ?",
+            "SELECT m.value->>'content' FROM chat_history c, json_each(c.messages) m"
+            " WHERE c.chat_id = ? AND m.value->>'role' = 'user' AND m.key != 0"
+            " ORDER BY m.key",
+            chat_id,
+        )
+        return cur.fetchall()
+    finally:
+        cur.close()
+
+
+def get_final_chat(chat_id: int) -> str:
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "SELECT m.value FROM chat_history c, json_each(c.messages) m"
+            " WHERE c.chat_id = ? ORDER BY m.key DESC LIMIT 1",
+            chat_id,
+        )
+        result = cur.fetchone()
+        try:
+            result = result[0]
+        except TypeError:
+            raise ValueError("Chat ID not found") from None
+        return result
+    finally:
+        cur.close()
+
+
+def get_random_chat_notes(n: int):
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "SELECT chat_id, note FROM notes ORDER BY random() LIMIT ?",
             (n,),
         )
         return cur.fetchall()
