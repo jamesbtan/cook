@@ -1,6 +1,6 @@
-import sqlite3
-import json
 from functools import wraps
+import json
+import sqlite3
 
 con = sqlite3.connect("persist.db")
 # set autocommit to True initially
@@ -34,13 +34,14 @@ def transaction(f):
 def initialize(cur: sqlite3.Cursor):
     cur.execute(
         "CREATE TABLE IF NOT EXISTS chat_history ("
-        "  chat_id INTEGER PRIMARY KEY, messages BLOB NOT NULL"
+        " chat_id INTEGER PRIMARY KEY, messages BLOB NOT NULL, created_at TEXT NOT NULL"
         ")"
     )
     cur.execute(
         "CREATE TABLE IF NOT EXISTS notes ("
-        "  note_id INTEGER PRIMARY KEY, chat_id INTEGER UNIQUE NOT NULL, note TEXT,"
-        "  FOREIGN KEY (chat_id) REFERENCES chat_history(chat_id)"
+        " note_id INTEGER PRIMARY KEY, chat_id INTEGER UNIQUE NOT NULL,"
+        " note TEXT NOT NULL, created_at TEXT NOT NULL,"
+        " FOREIGN KEY (chat_id) REFERENCES chat_history(chat_id)"
         ")"
     )
 
@@ -48,7 +49,7 @@ def initialize(cur: sqlite3.Cursor):
 @transaction
 def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
     cur.execute(
-        "INSERT INTO chat_history (messages) VALUES (jsonb(?))",
+        "INSERT INTO chat_history (messages, created_at) VALUES (jsonb(?), datetime('now'))",
         (json.dumps(messages),),
     )
 
@@ -56,19 +57,42 @@ def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
 @transaction
 def insert_note(cur: sqlite3.Cursor, chat_id: int, note: str):
     cur.execute(
-        "INSERT INTO summaries (chat_id, note) VALUES (?, ?)",
+        "INSERT INTO summaries (chat_id, note, created_at) VALUES (?, ?, datetime('now'))",
         (chat_id, note),
     )
 
 
+def get_newest_chat_id() -> int:
+    cur = con.cursor()
+    try:
+        cur.execute("SELECT chat_id FROM chat_history ORDER BY created_at DESC LIMIT 1")
+        result = cur.fetchone()
+        try:
+            result = result[0]
+        except TypeError:
+            raise ValueError("No chats found")
+        return result
+    finally:
+        cur.close()
+
+def newest_chat_id(f):
+    @wraps(f)
+    def wrapper(chat_id: int | None, *args, **kwargs):
+        if chat_id is None:
+            chat_id = get_newest_chat_id()
+        return f(chat_id, *args, **kwargs)
+    return wrapper
+
 # in general, I am preferring to defer JSON deserialization
 # because otherwise we have cases where we deserialize than immediately serialize
 # when we pass to the LLM
+@newest_chat_id
 def get_chat(chat_id: int) -> str:
     cur = con.cursor()
     try:
         cur.execute(
-            "SELECT json(messages) FROM chat_history WHERE chat_id = ?", chat_id
+            "SELECT json(messages) FROM chat_history WHERE chat_id = ?",
+            (chat_id,),
         )
         result = cur.fetchone()
         try:
@@ -87,20 +111,21 @@ def get_user_chats(chat_id: int) -> str:
             "SELECT m.value->>'content' FROM chat_history c, json_each(c.messages) m"
             " WHERE c.chat_id = ? AND m.value->>'role' = 'user' AND m.key != 0"
             " ORDER BY m.key",
-            chat_id,
+            (chat_id,),
         )
         return cur.fetchall()
     finally:
         cur.close()
 
 
+@newest_chat_id
 def get_final_chat(chat_id: int) -> str:
     cur = con.cursor()
     try:
         cur.execute(
             "SELECT m.value FROM chat_history c, json_each(c.messages) m"
             " WHERE c.chat_id = ? ORDER BY m.key DESC LIMIT 1",
-            chat_id,
+            (chat_id,),
         )
         result = cur.fetchone()
         try:

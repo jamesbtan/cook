@@ -6,47 +6,55 @@ import tomllib
 
 from ollama import chat
 
-from model import MealPlan, Note
-from tools import ToolExecutor, TOOLS
+from model import MealPlan
+from tools import ToolExecutor
 import db
 
 
-green = "\033[92;40m"
-reset = "\033[0m"
+def print_green(s, **kwargs):
+    green = "\033[92;40m"
+    reset = "\033[0m"
+    print(green, **{**kwargs, "flush": False, "end": ""})
+    print(s, **{**kwargs, "flush": False, "end": ""})
+    print(reset, **kwargs)
 
 
 def main():
-    tool_calls = True
+    def process_tool_calls():
+        nonlocal tool_calls
+        response = chat(
+            **payload,
+            tools=ToolExecutor.tools(),
+            stream=True,
+        )
+        tool_calls = False
+        for name, result in ToolExecutor(process_chunks(response)):
+            payload["messages"].append(
+                {"role": "tool", "tool_name": name, "content": result}
+            )
+            tool_calls = True
+
+    def process_content():
+        print_green("Collecting structured response")
+        response = chat(
+            **payload,
+            format=MealPlan.model_json_schema(),
+        )
+        mealplan = MealPlan.model_validate_json(response.message.content)
+        mealplan.print()
+        payload["messages"].append(
+            {
+                "role": "assistant",
+                "content": response.message.content,
+            }
+        )
+
     for message in get_user_messages(get_user_contents()):
         payload["messages"].append(message)
-        while True:
-            if tool_calls:
-                extra_payload = {
-                    "tools": [t.func for t in TOOLS.values()],
-                    "stream": True,
-                }
-            else:
-                print(f"{green}Collecting structured response{reset}")
-                extra_payload = {"format": MealPlan.model_json_schema()}
-            response = chat(**payload, **extra_payload)
-
-            if tool_calls:
-                tool_calls = False
-                for name, result in ToolExecutor(process_chunks(response)):
-                    payload["messages"].append(
-                        {"role": "tool", "tool_name": name, "content": result}
-                    )
-                    tool_calls = True
-            else:
-                mealplan = MealPlan.model_validate_json(response.message.content)
-                mealplan.print()
-                payload["messages"].append(
-                    {
-                        "role": "assistant",
-                        "content": response.message.content,
-                    }
-                )
-                break
+        tool_calls = True
+        while tool_calls:
+            process_tool_calls()
+        process_content()
 
 
 def get_initial_prompt():
@@ -72,7 +80,7 @@ def get_initial_prompt():
     )
 
     print(initial)
-    print(f"{green}==={reset}")
+    print_green("===")
     return initial
 
 
@@ -84,7 +92,7 @@ def get_user_contents():
         yield get_initial_prompt()
 
     while True:
-        print(f"{green}>>>{reset}", end=" ")
+        print_green(">>>", end=" ")
         try:
             content = input()
         except EOFError:
@@ -129,20 +137,24 @@ def rewind(messages):
         print(f"</{message['role']}>")
 
 
-def get_note() -> Note:
-    return input(f"{green}Note{reset}: ")
+def get_note() -> str:
+    print_green("Note", end=": ")
+    return input()
 
 
 if __name__ == "__main__":
+    _sentinel = object()
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("-r", "--rewind")
-    mode.add_argument("-n", "--note")
-    mode.add_argument("-f", "--final")
+    # rewinding a chat brings up the old chat history and allows you to continue the conversation
+    # saved as a duplicate chat, to prevent invalidating context for notes
+    mode.add_argument("-r", "--rewind", nargs='?', const=None, default=_sentinel)
+    mode.add_argument("-n", "--note", nargs='?', const=None, default=_sentinel)
+    mode.add_argument("-f", "--final", nargs='?', const=None, default=_sentinel)
     args = parser.parse_args()
 
     db.initialize()
-    if args.final is not None:
+    if args.final is not _sentinel:
         message = json.loads(db.get_final_chat(args.final))
         mealplan = MealPlan.model_validate_json(message["content"])
         mealplan.print()
@@ -153,17 +165,17 @@ if __name__ == "__main__":
         "messages": [],
     }
 
-    if args.rewind is not None:
+    if args.rewind is not _sentinel:
         rewind_id = args.rewind
-    elif args.note is not None:
+    elif args.note is not _sentinel:
         rewind_id = args.note
     else:
-        rewind_id = None
+        rewind_id = _sentinel
 
-    if rewind_id is not None:
+    if rewind_id is not _sentinel:
         rewind(json.loads(db.get_chat(rewind_id)))
 
-    if args.note:
+    if args.note is not _sentinel:
         db.insert_note(args.note, get_note())
     else:
         main()
