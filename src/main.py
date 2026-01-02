@@ -58,10 +58,15 @@ def main():
 
 
 def get_initial_prompt():
-    with open("config.toml", "rb") as f:
-        config = tomllib.load(f)
-    pantry = ", ".join(config["pantry"])
-    equipment = ", ".join(config["equipment"])
+    try:
+        with open("config.toml", "rb") as f:
+            config = tomllib.load(f)
+    except Exception:
+        config = {}
+
+    pantry = config.get("pantry", [])
+    equipment = config.get("equipment", [])
+
     initial = (
         "Provide a minimal meal plan that is cheap, nutrient-rich, and calorie dense. "
         "Meals should be a combination of a few wholefoods, I don't want too much prep work. "

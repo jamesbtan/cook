@@ -10,3 +10,4 @@ wheels/
 .venv
 
 persist.db
+config.toml

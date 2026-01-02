@@ -7,6 +7,9 @@ import db
 
 TOOLS = {}
 
+# TODO revise tool calls
+# TODO revise return types?
+
 
 def tool(f):
     TOOLS[f.__name__] = f
@@ -31,7 +34,7 @@ def get_meal_notes(
 
 # Only giving the user messages
 # When I tried giving the full chat history, the model would repeat past recipes verbatim
-@tool
+# @tool
 @unique_args
 def get_meal_chat(chat_id: int) -> list[str]:
     """Get the user's chat messages given a chat_id
