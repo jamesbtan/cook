@@ -55,11 +55,15 @@ def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
 
 
 @transaction
-def insert_note(cur: sqlite3.Cursor, chat_id: int, note: str):
-    cur.execute(
-        "INSERT INTO summaries (chat_id, note, created_at) VALUES (?, ?, datetime('now'))",
-        (chat_id, note),
-    )
+def insert_note(cur: sqlite3.Cursor, chat_id: int | None, note: str):
+    @newest_chat_id
+    def helper(chat_id: int):
+        cur.execute(
+            "INSERT INTO notes (chat_id, note, created_at) VALUES (?, ?, datetime('now'))",
+            (chat_id, note),
+        )
+
+    helper(chat_id)
 
 
 def get_newest_chat_id() -> int:
@@ -75,13 +79,16 @@ def get_newest_chat_id() -> int:
     finally:
         cur.close()
 
+
 def newest_chat_id(f):
     @wraps(f)
     def wrapper(chat_id: int | None, *args, **kwargs):
         if chat_id is None:
             chat_id = get_newest_chat_id()
         return f(chat_id, *args, **kwargs)
+
     return wrapper
+
 
 # in general, I am preferring to defer JSON deserialization
 # because otherwise we have cases where we deserialize than immediately serialize

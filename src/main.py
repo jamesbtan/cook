@@ -49,8 +49,13 @@ def main():
             }
         )
 
-    for message in get_user_messages(get_user_contents()):
-        payload["messages"].append(message)
+    for content in get_user_contents():
+        if content == "edit":
+            # TODO implement user edit
+            content = content
+            payload["messages"].append(get_user_message(content))
+            break
+        payload["messages"].append(get_user_message(content))
         tool_calls = True
         while tool_calls:
             process_tool_calls()
@@ -67,6 +72,7 @@ def get_initial_prompt():
     pantry = config.get("pantry", [])
     equipment = config.get("equipment", [])
 
+    # TODO pull prompt to file
     initial = (
         "Provide a minimal meal plan that is cheap, nutrient-rich, and calorie dense. "
         "Meals should be a combination of a few wholefoods, I don't want too much prep work. "
@@ -89,30 +95,37 @@ def get_initial_prompt():
     return initial
 
 
+def get_user_message(content):
+    return {
+        "role": "user",
+        "content": content,
+    }
+
+
 def get_user_contents():
     should_save = False
 
-    if not payload["messages"]:
-        should_save = True
-        yield get_initial_prompt()
+    try:
+        if not payload["messages"]:
+            should_save = True
+            yield get_initial_prompt()
 
-    while True:
-        print_green(">>>", end=" ")
-        try:
-            content = input()
-        except EOFError:
-            break
-        if not content:
-            break
-        should_save = True
-        yield content
-
-    if should_save:
-        db.insert_chat(payload["messages"])
-
-
-def get_user_messages(user_contents):
-    return ({"role": "user", "content": content} for content in user_contents)
+        while True:
+            print_green(">>>", end=" ")
+            try:
+                content = input()
+            except EOFError:
+                break
+            if not content:
+                break
+            should_save = True
+            yield content
+    except KeyboardInterrupt:
+        should_save = False
+        raise
+    finally:
+        if should_save:
+            db.insert_chat(payload["messages"])
 
 
 def process_chunks(stream):
@@ -153,9 +166,9 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group()
     # rewinding a chat brings up the old chat history and allows you to continue the conversation
     # saved as a duplicate chat, to prevent invalidating context for notes
-    mode.add_argument("-r", "--rewind", nargs='?', const=None, default=_sentinel)
-    mode.add_argument("-n", "--note", nargs='?', const=None, default=_sentinel)
-    mode.add_argument("-f", "--final", nargs='?', const=None, default=_sentinel)
+    mode.add_argument("-r", "--rewind", nargs="?", const=None, default=_sentinel)
+    mode.add_argument("-n", "--note", nargs="?", const=None, default=_sentinel)
+    mode.add_argument("-f", "--final", nargs="?", const=None, default=_sentinel)
     args = parser.parse_args()
 
     db.initialize()

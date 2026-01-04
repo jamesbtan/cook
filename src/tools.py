@@ -1,5 +1,6 @@
 from pprint import pprint
 import json
+import random
 
 from tool_constraints import call_limit, unique_args, InvalidToolCall
 import db
@@ -16,7 +17,12 @@ def tool(f):
     return f
 
 
-@tool
+# 50% of the time, do not reference history
+# hopefully, encourage more original recipes
+historical_tool = random.choice([tool, lambda f: f])
+
+
+@historical_tool
 @call_limit(1)
 def get_meal_notes(
     n: int = 3,
@@ -32,9 +38,7 @@ def get_meal_notes(
     return db.get_random_chat_notes(n)
 
 
-# Only giving the user messages
-# When I tried giving the full chat history, the model would repeat past recipes verbatim
-# @tool
+@historical_tool
 @unique_args
 def get_meal_chat(chat_id: int) -> list[str]:
     """Get the user's chat messages given a chat_id
@@ -44,11 +48,12 @@ def get_meal_chat(chat_id: int) -> list[str]:
 
     :param chat_id: The chat_id to fetch from the database
 
-    :returns: A list of messages from the user, not including the initial prompt
+    :returns: A list of messages from that chat
     """
-    pass
+    return json.loads(db.get_chat(chat_id))
 
 
+# @tool
 def get_food_details() -> str:
     """Query an API to get details about a particular food item"""
     # TODO find a nutrition details API
@@ -66,7 +71,7 @@ class ToolExecutor:
         self.calls = calls
 
     def tools():
-        return [t.func for t in TOOLS.values()]
+        return list(TOOLS.values())
 
     def __iter__(self):
         for call in self.calls:
