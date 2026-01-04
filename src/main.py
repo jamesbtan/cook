@@ -1,6 +1,9 @@
 from pprint import pprint
+from tempfile import NamedTemporaryFile
 import argparse
 import json
+import os
+import subprocess
 import sys
 import tomllib
 
@@ -20,11 +23,13 @@ def print_green(s, **kwargs):
 
 
 def main():
+    tools = ToolExecutor.tools()
+
     def process_tool_calls():
         nonlocal tool_calls
         response = chat(
             **payload,
-            tools=ToolExecutor.tools(),
+            tools=tools,
             stream=True,
         )
         tool_calls = False
@@ -52,14 +57,35 @@ def main():
     for content in get_user_contents():
         if content == "edit":
             # TODO implement user edit
-            content = content
-            payload["messages"].append(get_user_message(content))
+            prev_structured = next(msg for msg in reversed(payload["messages"]))
+            prev_structured = prev_structured["content"]
+            content = input_from_editor(prev_structured.encode("utf-8"))
+            if prev_structured != content:
+                mealplan = MealPlan.model_validate_json(content)
+                mealplan.print()
+                payload["messages"].append(get_user_message(content))
             break
         payload["messages"].append(get_user_message(content))
         tool_calls = True
-        while tool_calls:
+        while tools and tool_calls:
             process_tool_calls()
         process_content()
+
+
+def input_from_editor(initial=None):
+    with NamedTemporaryFile(delete=False) as tmp:
+        if initial is not None:
+            tmp.write(initial)
+            tmp.flush()
+        path = tmp.name
+
+    try:
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        subprocess.run([editor, path])
+        with open(path, "r") as f:
+            return f.read()
+    finally:
+        os.unlink(path)
 
 
 def get_initial_prompt():
@@ -103,11 +129,10 @@ def get_user_message(content):
 
 
 def get_user_contents():
-    should_save = False
+    orig_len = len(payload["messages"])
 
     try:
-        if not payload["messages"]:
-            should_save = True
+        if orig_len == 0:
             yield get_initial_prompt()
 
         while True:
@@ -118,14 +143,14 @@ def get_user_contents():
                 break
             if not content:
                 break
-            should_save = True
             yield content
     except KeyboardInterrupt:
-        should_save = False
         raise
     finally:
-        if should_save:
-            db.insert_chat(payload["messages"])
+        # payload["messages"] is append-only
+        if orig_len != len(payload["messages"]):
+            print("SAVING")
+            # db.insert_chat(payload["messages"])
 
 
 def process_chunks(stream):
