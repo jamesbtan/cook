@@ -31,7 +31,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-def transaction(
+def with_cursor(
     f: Callable[Concatenate[sqlite3.Cursor, P], R],
 ) -> Callable[P, R]:
     @wraps(f)
@@ -39,13 +39,20 @@ def transaction(
         cur = con.cursor()
         try:
             res = f(cur, *args, **kwargs)
-            con.commit()
             return res
-        except Exception:
-            con.rollback()
-            raise
         finally:
             cur.close()
+
+    return wrapper
+
+
+def transaction(
+    f: Callable[P, R],
+) -> Callable[P, R]:
+    @wraps(f)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        with con:
+            return f(*args, **kwargs)
 
     return wrapper
 
@@ -62,8 +69,8 @@ def newest_chat_id(
     return wrapper
 
 
-def get_newest_chat_id() -> int:
-    cur = con.cursor()
+@with_cursor
+def get_newest_chat_id(cur) -> int:
     try:
         cur.execute("SELECT chat_id FROM chat_history ORDER BY created_at DESC LIMIT 1")
         result = cur.fetchone()
@@ -77,6 +84,7 @@ def get_newest_chat_id() -> int:
 
 
 @transaction
+@with_cursor
 def initialize(cur: sqlite3.Cursor):
     cur.execute(
         "CREATE TABLE IF NOT EXISTS chat_history ("
@@ -93,6 +101,7 @@ def initialize(cur: sqlite3.Cursor):
 
 
 @transaction
+@with_cursor
 def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
     cur.execute(
         "INSERT INTO chat_history (messages, created_at) VALUES (jsonb(?), datetime('now'))",
@@ -101,6 +110,7 @@ def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
 
 
 @transaction
+@with_cursor
 def insert_note(cur: sqlite3.Cursor, chat_id: int | None, note: str):
     @newest_chat_id
     def default_to_newest(chat_id: int):
@@ -116,7 +126,7 @@ def insert_note(cur: sqlite3.Cursor, chat_id: int | None, note: str):
 # because otherwise we have cases where we deserialize than immediately serialize
 # when we pass to the LLM
 @newest_chat_id
-@transaction
+@with_cursor
 def get_chat(cur: sqlite3.Cursor, chat_id: int) -> str:
     cur.execute(
         "SELECT json(messages) AS history FROM chat_history WHERE chat_id = ?",
@@ -130,7 +140,7 @@ def get_chat(cur: sqlite3.Cursor, chat_id: int) -> str:
     return result
 
 
-@transaction
+@with_cursor
 def get_user_chats(cur: sqlite3.Cursor, chat_id: int) -> list[str]:
     cur.execute(
         "SELECT m.value->>'content' AS content FROM chat_history c, json_each(c.messages) m"
@@ -147,7 +157,7 @@ def get_user_chats(cur: sqlite3.Cursor, chat_id: int) -> list[str]:
 
 
 @newest_chat_id
-@transaction
+@with_cursor
 def get_final_chat(cur, chat_id: int) -> str:
     cur.execute(
         "SELECT m.value AS message FROM chat_history c, json_each(c.messages) m"
@@ -167,7 +177,7 @@ class ChatNote(TypedDict):
     note: str
 
 
-@transaction
+@with_cursor
 def get_random_chat_notes(cur, n: int) -> list[ChatNote]:
     cur.execute(
         "SELECT chat_id, note FROM notes ORDER BY random() LIMIT ?",
