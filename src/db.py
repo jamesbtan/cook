@@ -1,4 +1,11 @@
 from functools import wraps
+from typing import (
+    Callable,
+    Concatenate,
+    ParamSpec,
+    TypedDict,
+    TypeVar,
+)
 import json
 import sqlite3
 
@@ -10,12 +17,25 @@ con = sqlite3.connect("persist.db")
 con = sqlite3.connect("persist.db", autocommit=True)
 con.execute("PRAGMA foreign_keys = ON")
 con.autocommit = False
-con.row_factory = sqlite3.Row
 
 
-def transaction(f):
+def dict_factory(cursor, row):
+    fields = [column[0] for column in cursor.description]
+    return {key: value for key, value in zip(fields, row)}
+
+
+con.row_factory = dict_factory
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def transaction(
+    f: Callable[Concatenate[sqlite3.Cursor, P], R],
+) -> Callable[P, R]:
     @wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         cur = con.cursor()
         try:
             res = f(cur, *args, **kwargs)
@@ -28,6 +48,32 @@ def transaction(f):
             cur.close()
 
     return wrapper
+
+
+def newest_chat_id(
+    f: Callable[Concatenate[int, P], R],
+) -> Callable[Concatenate[int | None, P], R]:
+    @wraps(f)
+    def wrapper(chat_id: int | None, *args, **kwargs):
+        if chat_id is None:
+            chat_id = get_newest_chat_id()
+        return f(chat_id, *args, **kwargs)
+
+    return wrapper
+
+
+def get_newest_chat_id() -> int:
+    cur = con.cursor()
+    try:
+        cur.execute("SELECT chat_id FROM chat_history ORDER BY created_at DESC LIMIT 1")
+        result = cur.fetchone()
+        try:
+            result = result["chat_id"]
+        except TypeError:
+            raise ValueError("No chats found")
+        return result
+    finally:
+        cur.close()
 
 
 @transaction
@@ -57,100 +103,74 @@ def insert_chat(cur: sqlite3.Cursor, messages: list[dict[str, str]]):
 @transaction
 def insert_note(cur: sqlite3.Cursor, chat_id: int | None, note: str):
     @newest_chat_id
-    def helper(chat_id: int):
+    def default_to_newest(chat_id: int):
         cur.execute(
             "INSERT INTO notes (chat_id, note, created_at) VALUES (?, ?, datetime('now'))",
             (chat_id, note),
         )
 
-    helper(chat_id)
-
-
-def get_newest_chat_id() -> int:
-    cur = con.cursor()
-    try:
-        cur.execute("SELECT chat_id FROM chat_history ORDER BY created_at DESC LIMIT 1")
-        result = cur.fetchone()
-        try:
-            result = result[0]
-        except TypeError:
-            raise ValueError("No chats found")
-        return result
-    finally:
-        cur.close()
-
-
-def newest_chat_id(f):
-    @wraps(f)
-    def wrapper(chat_id: int | None, *args, **kwargs):
-        if chat_id is None:
-            chat_id = get_newest_chat_id()
-        return f(chat_id, *args, **kwargs)
-
-    return wrapper
+    default_to_newest(chat_id)
 
 
 # in general, I am preferring to defer JSON deserialization
 # because otherwise we have cases where we deserialize than immediately serialize
 # when we pass to the LLM
 @newest_chat_id
-def get_chat(chat_id: int) -> str:
-    cur = con.cursor()
+@transaction
+def get_chat(cur: sqlite3.Cursor, chat_id: int) -> str:
+    cur.execute(
+        "SELECT json(messages) AS history FROM chat_history WHERE chat_id = ?",
+        (chat_id,),
+    )
+    result = cur.fetchone()
     try:
-        cur.execute(
-            "SELECT json(messages) FROM chat_history WHERE chat_id = ?",
-            (chat_id,),
-        )
-        result = cur.fetchone()
-        try:
-            result = result[0]
-        except TypeError:
-            raise ValueError("Chat ID not found") from None
-        return result
-    finally:
-        cur.close()
+        result = result["history"]
+    except TypeError:
+        raise ValueError("Chat ID not found") from None
+    return result
 
 
-def get_user_chats(chat_id: int) -> str:
-    cur = con.cursor()
-    try:
-        cur.execute(
-            "SELECT m.value->>'content' FROM chat_history c, json_each(c.messages) m"
-            " WHERE c.chat_id = ? AND m.value->>'role' = 'user' AND m.key != 0"
-            " ORDER BY m.key",
-            (chat_id,),
-        )
-        return cur.fetchall()
-    finally:
-        cur.close()
+@transaction
+def get_user_chats(cur: sqlite3.Cursor, chat_id: int) -> list[str]:
+    cur.execute(
+        "SELECT m.value->>'content' AS content FROM chat_history c, json_each(c.messages) m"
+        " WHERE c.chat_id = ? AND m.value->>'role' = 'user' AND m.key != 0"
+        " ORDER BY m.key",
+        (chat_id,),
+    )
+
+    def get_rows():
+        while (row := cur.fetchone()) is not None:
+            yield row
+
+    return [row["content"] for row in get_rows()]
 
 
 @newest_chat_id
-def get_final_chat(chat_id: int) -> str:
-    cur = con.cursor()
+@transaction
+def get_final_chat(cur, chat_id: int) -> str:
+    cur.execute(
+        "SELECT m.value AS message FROM chat_history c, json_each(c.messages) m"
+        " WHERE c.chat_id = ? ORDER BY m.key DESC LIMIT 1",
+        (chat_id,),
+    )
+    result = cur.fetchone()
     try:
-        cur.execute(
-            "SELECT m.value FROM chat_history c, json_each(c.messages) m"
-            " WHERE c.chat_id = ? ORDER BY m.key DESC LIMIT 1",
-            (chat_id,),
-        )
-        result = cur.fetchone()
-        try:
-            result = result[0]
-        except TypeError:
-            raise ValueError("Chat ID not found") from None
-        return result
-    finally:
-        cur.close()
+        result = result["message"]
+    except TypeError:
+        raise ValueError("Chat ID not found") from None
+    return result
 
 
-def get_random_chat_notes(n: int):
-    cur = con.cursor()
-    try:
-        cur.execute(
-            "SELECT chat_id, note FROM notes ORDER BY random() LIMIT ?",
-            (n,),
-        )
-        return cur.fetchall()
-    finally:
-        cur.close()
+class ChatNote(TypedDict):
+    chat_id: int
+    note: str
+
+
+@transaction
+def get_random_chat_notes(cur, n: int) -> list[ChatNote]:
+    cur.execute(
+        "SELECT chat_id, note FROM notes ORDER BY random() LIMIT ?",
+        (n,),
+    )
+    return cur.fetchall()

@@ -54,9 +54,10 @@ def main():
             }
         )
 
+    orig_len = len(payload["messages"])
     for content in get_user_contents():
         if content == "edit":
-            # TODO implement user edit
+            # TODO messy
             prev_structured = next(msg for msg in reversed(payload["messages"]))
             prev_structured = prev_structured["content"]
             content = input_from_editor(prev_structured.encode("utf-8"))
@@ -70,6 +71,10 @@ def main():
         while tools and tool_calls:
             process_tool_calls()
         process_content()
+
+    if orig_len != len(payload["messages"]):
+        print("SAVING")
+        db.insert_chat(payload["messages"])
 
 
 def input_from_editor(initial=None):
@@ -131,26 +136,19 @@ def get_user_message(content):
 def get_user_contents():
     orig_len = len(payload["messages"])
 
-    try:
-        if orig_len == 0:
-            yield get_initial_prompt()
+    if orig_len == 0:
+        yield get_initial_prompt()
 
-        while True:
-            print_green(">>>", end=" ")
-            try:
-                content = input()
-            except EOFError:
-                break
-            if not content:
-                break
-            yield content
-    except KeyboardInterrupt:
-        raise
-    finally:
-        # payload["messages"] is append-only
-        if orig_len != len(payload["messages"]):
-            print("SAVING")
-            # db.insert_chat(payload["messages"])
+    while True:
+        print_green(">>>", end=" ")
+        try:
+            content = input()
+        except EOFError:
+            break
+        if not content:
+            print("breaking")
+            break
+        yield content
 
 
 def process_chunks(stream):
@@ -216,6 +214,7 @@ if __name__ == "__main__":
         rewind_id = _sentinel
 
     if rewind_id is not _sentinel:
+        assert isinstance(rewind_id, int)
         rewind(json.loads(db.get_chat(rewind_id)))
 
     if args.note is not _sentinel:

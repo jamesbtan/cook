@@ -26,7 +26,7 @@ historical_tool = random.choice([tool, lambda f: f])
 @call_limit(1)
 def get_meal_notes(
     n: int = 3,
-) -> list[dict]:
+) -> list[db.ChatNote]:
     """Get a random sample of notes from past meal plans
 
     Use this tool once at the start of the conversation to get an idea of past preferences
@@ -70,6 +70,7 @@ class ToolExecutor:
         self.interrupted = False
         self.calls = calls
 
+    @staticmethod
     def tools():
         return list(TOOLS.values())
 
@@ -85,7 +86,7 @@ class ToolExecutor:
                 print(f"Calling tool {name}")
                 pprint(args)
                 try:
-                    result = tool.func(**args)
+                    result = tool(**args)
                 except InvalidToolCall as e:
                     print(e)
                     continue

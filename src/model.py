@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class Meal(BaseModel):
     name: str
     ingredients: list[str]
-    steps: list[str]
+    steps: list[str] = Field(description="Preparation instructions")
 
 
 class MealPlan(BaseModel):
